@@ -1,21 +1,20 @@
 import Redis, { Cluster } from 'ioredis';
 import Redlock from "redlock";
-const Redis = require('ioredis');
 
-const redisA = new Redis({ host: "" });
-const redisB = new Redis({ host: "" });
 const client = new Cluster(
   [
     {
-      host: "",
+      host: "x.x.x.x", //Redis cluster dns name
       port: 6379,
     },
   ],
 );
-const sessionLock = new Redlock(
+
+// session lock object to lock the session
+export const sessionLock = new Redlock(
   // You should have one client for each independent redis node
   // or cluster.
-  [redisA, redisB],
+ [client],
   {
     // The expected clock drift; for more details see:
     // http://redis.io/topics/distlock
@@ -26,7 +25,7 @@ const sessionLock = new Redlock(
     retryCount: 10,
   
     // the time in ms between attempts
-    retryDelay: 200, // time in ms
+    retryDelay:200, // time in ms
   
     // the max time in ms randomly added to retries
     // to improve performance under high contention
@@ -38,45 +37,55 @@ const sessionLock = new Redlock(
     automaticExtensionThreshold: 500, // time in ms
   }
   );
-  module.exports = {
-  sessionLock,
-  createSession,
-  checkIfMaxSession
-  };
   
-  
-  // write a function that access id as sessionId and adds it list of sessions in Redis. The function must also check if the number of sessions reached is 5 then it should remove the old session and add it to the list ensure ll this is locked by session lock
-  function createSession(sessionId, userId) {
-  const sessionsKey = `usersessions:${userId}`;
-  sessionLock.acquire([sessionId], 1000)
-    .then(function(lock) {
-    return client.llen(sessionsKey)
-      .then(function(count) {
-      if (count >= 5) {
-        return client.rpop(sessionsKey);
-      }
-      })
-      .then(function() {
-      return client.lpush(sessionsKey, sessionId);
-      })
-      .then(function(result) {
-      console.log('Session added:', result);
-      })
-      .finally(function() {
-      return lock.release();
-      });
-    })
-    .catch(function(err) {
-    console.error('Error adding session:', err);
-    });
-  }
 
-  // write a function that returns the count of session in Redis and ensure that this is locked by session lock
-  function checkIfMaxSession(userId) {
-  const sessionsKey = `usersessions:${userId}`;
-  sessionLock.acquire([sessionsKey], 1000)
+// a function to create a session in Redis and ensure that this is locked by session lock
+// this function is gaurded by session lock and hence any other function trying to access the same resource will be blocked
+ export async function createSession(userId,sessionId) {
+  const sessionsList = `usersessions:${userId}`;
+  const lockResource= `lock:${userId}`;
+
+  let lock = await sessionLock.acquire([lockResource],100);
+  try{
+	let count = await client.llen(sessionsList);
+		
+      if (count >= 5) {
+        await client.rpop(sessionsList);
+      }
+      else
+	{
+	  	
+        let result = await client.lpush(sessionsList, sessionId);
+	console.log('session added ' , result);
+		
+	count = await client.llen(sessionsList);
+	console.log('session length',count);
+	}
+
+  }
+	
+  finally {
+	await lock.release();
+  }
+ }
+
+ sessionLock.on("error", (error) => {
+  // Ignore cases where a resource is explicitly marked as locked on a client.
+  //if (error instanceof ResourceLockedError) { // To be fixed
+   // return;
+  //}
+
+  // Log all other errors.
+  console.error(error);
+});
+  
+// a function that returns the count of session in Redis and ensure that this is locked by session lock , while retrieving the count
+  export function checkIfMaxSession(userId) {
+  const sessionsList= `usersessions:${userId}`;
+  const lockResource= `lock:${userId}`;
+  sessionLock.acquire([lockResource], 100)
     .then(function(lock) {
-    return client.llen(sessionsKey)
+    return client.llen(sessionsList)
       .then(function(count) {
       console.log('Session count:', count);
       return count >= 5;
@@ -89,3 +98,5 @@ const sessionLock = new Redlock(
     console.error('Error checking session count:', err);
     });
   }
+
+
